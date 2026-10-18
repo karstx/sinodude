@@ -59,7 +59,7 @@
 
             meta = with pkgs.lib; {
               description = "A programming tool for SinoWealth 8051 microcontrollers";
-              homepage = "https://github.com/carlossless/sinodude";
+              homepage = "https://github.com/karstx/sinodude";
               license = licenses.mit;
               mainProgram = "sinodude";
               maintainers = with maintainers; [ carlossless ];
