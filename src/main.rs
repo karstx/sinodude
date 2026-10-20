@@ -22,6 +22,18 @@ fn parse_hex(s: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         .collect()
 }
 
+/// The 6-byte customer unlock password. The dongle's key field is 8 bytes, so it is padded with two
+/// zero bytes.
+fn parse_unlock_key(s: &str) -> Result<[u8; 8], Box<dyn std::error::Error>> {
+    let bytes = parse_hex(s)?;
+    if bytes.len() != 6 {
+        return Err(format!("unlock password must be 6 bytes, got {}", bytes.len()).into());
+    }
+    let mut key = [0u8; 8];
+    key[..6].copy_from_slice(&bytes);
+    Ok(key)
+}
+
 fn parse_addr(s: &str) -> Result<usize, Box<dyn std::error::Error>> {
     let s = s.trim();
     if s.starts_with("0x") || s.starts_with("0X") {
@@ -74,6 +86,19 @@ fn parse_group_spec(
     Ok(selected)
 }
 
+fn sinolink_args() -> [Arg; 4] {
+    [
+        arg!(--power_on_time <N> "SinoLink power-on time, 3..27 (default 3)").required(false),
+        arg!(--use_reset_pin "SinoLink: drive the reset pin during entry and always run a full entry")
+            .action(clap::ArgAction::SetTrue)
+            .required(false),
+        arg!(--link <LINK> "SinoLink target link: 4wire (default) or 1wire").required(false),
+        arg!(--boot_rom "SinoLink: program and erase the boot (ISP) area; only for parts with an ISP region")
+            .action(clap::ArgAction::SetTrue)
+            .required(false),
+    ]
+}
+
 fn cli() -> Command {
     Command::new("sinodude")
         .about("programming tool for sinowealth devices")
@@ -90,7 +115,7 @@ fn cli() -> Command {
                 .group(ArgGroup::new("memory").args(["flash", "eeprom"]).multiple(true).required(true))
                 .arg(
                     arg!(-c --programmer <PROGRAMMER>)
-                        .value_parser(["sinodude-serial"])
+                        .value_parser(["sinodude-serial", "sinolink"])
                         .required(true),
                 )
                 .arg(
@@ -103,7 +128,22 @@ fn cli() -> Command {
                         .required(false),
                 )
                 .arg(
-                    arg!(--key <KEY> "Customer unlock key for a password-protected part (8 bytes hex)")
+                    arg!(--power <MODE> "Target power for the sinolink programmer: 3v3, 5v or external")
+                        .required(false),
+                )
+                .arg(
+                    arg!(--supply <RAIL> "Deprecated spelling of --power")
+                        .required(false)
+                        .hide(true),
+                )
+                .args(sinolink_args())
+                .arg(
+                    arg!(--key <KEY> "Customer password for a protected part (6 bytes hex)")
+                        .required(false),
+                )
+                .arg(
+                    arg!(--ignore_part_number "Continue when the die reports a part number that does not match --part")
+                        .action(clap::ArgAction::SetTrue)
                         .required(false),
                 ),
         )
@@ -116,7 +156,7 @@ fn cli() -> Command {
                 .group(ArgGroup::new("memory").args(["flash", "eeprom"]).multiple(true).required(true))
                 .arg(
                     arg!(-c --programmer <PROGRAMMER>)
-                        .value_parser(["sinodude-serial"])
+                        .value_parser(["sinodude-serial", "sinolink"])
                         .required(true),
                 )
                 .arg(
@@ -129,7 +169,17 @@ fn cli() -> Command {
                         .required(false),
                 )
                 .arg(
-                    arg!(--key <KEY> "Customer unlock key for a password-protected part (8 bytes hex)")
+                    arg!(--power <MODE> "Target power for the sinolink programmer: 3v3, 5v or external")
+                        .required(false),
+                )
+                .arg(
+                    arg!(--supply <RAIL> "Deprecated spelling of --power")
+                        .required(false)
+                        .hide(true),
+                )
+                .args(sinolink_args())
+                .arg(
+                    arg!(--key <KEY> "Customer password for a protected part (6 bytes hex)")
                         .required(false),
                 )
                 .arg(
@@ -160,7 +210,15 @@ fn cli() -> Command {
                     arg!(--end_addr <END_ADDR> "End address for partial write (hex, e.g., 0x2000)")
                         .required(false),
                 )
-                ,
+                .arg(
+                    arg!(--erase_mode <MODE> "Force a vendor erase-mode index (0-5) instead of the part's own. Mode 3 (ICP 0x5E) erases the die's product-identity record, which no write path can restore")
+                        .required(false),
+                )
+                .arg(
+                    arg!(--ignore_part_number "Continue when the die reports a part number that does not match --part")
+                        .action(clap::ArgAction::SetTrue)
+                        .required(false),
+                ),
         )
         .subcommand(
             Command::new("erase")
@@ -168,7 +226,7 @@ fn cli() -> Command {
                 .about("Erase the chip's flash (mass erase or specific sectors)")
                 .arg(
                     arg!(-c --programmer <PROGRAMMER>)
-                        .value_parser(["sinodude-serial"])
+                        .value_parser(["sinodude-serial", "sinolink"])
                         .required(true),
                 )
                 .arg(
@@ -181,7 +239,17 @@ fn cli() -> Command {
                         .required(false),
                 )
                 .arg(
-                    arg!(--key <KEY> "Customer unlock key for a password-protected part (8 bytes hex)")
+                    arg!(--power <MODE> "Target power for the sinolink programmer: 3v3, 5v or external")
+                        .required(false),
+                )
+                .arg(
+                    arg!(--supply <RAIL> "Deprecated spelling of --power")
+                        .required(false)
+                        .hide(true),
+                )
+                .args(sinolink_args())
+                .arg(
+                    arg!(--key <KEY> "Customer password for a protected part (6 bytes hex)")
                         .required(false),
                 )
                 .arg(
@@ -198,7 +266,12 @@ fn cli() -> Command {
                         .action(ArgAction::SetTrue),
                 )
                 .arg(
-                    arg!(--erase_mode <MODE> "Force a vendor erase-mode index (0-5) instead of the part's own; 3 and 4 are not otherwise reachable")
+                    arg!(--erase_mode <MODE> "Force a vendor erase-mode index (0-5) instead of the part's own. Mode 3 (ICP 0x5E) erases the die's product-identity record, which no write path can restore")
+                        .required(false),
+                )
+                .arg(
+                    arg!(--ignore_part_number "Continue when the die reports a part number that does not match --part")
+                        .action(clap::ArgAction::SetTrue)
                         .required(false),
                 ),
         )
@@ -207,7 +280,7 @@ fn cli() -> Command {
                 .about("Show or apply the chip's per-group read/write protection")
                 .arg(
                     arg!(-c --programmer <PROGRAMMER>)
-                        .value_parser(["sinodude-serial"])
+                        .value_parser(["sinodude-serial", "sinolink"])
                         .required(true),
                 )
                 .arg(
@@ -220,7 +293,22 @@ fn cli() -> Command {
                         .required(false),
                 )
                 .arg(
-                    arg!(--key <KEY> "Customer unlock key for a password-protected part (8 bytes hex)")
+                    arg!(--power <MODE> "Target power for the sinolink programmer: 3v3, 5v or external")
+                        .required(false),
+                )
+                .arg(
+                    arg!(--supply <RAIL> "Deprecated spelling of --power")
+                        .required(false)
+                        .hide(true),
+                )
+                .args(sinolink_args())
+                .arg(
+                    arg!(--key <KEY> "Customer password for a protected part (6 bytes hex)")
+                        .required(false),
+                )
+                .arg(
+                    arg!(--ignore_part_number "Continue when the die reports a part number that does not match --part")
+                        .action(clap::ArgAction::SetTrue)
                         .required(false),
                 )
                 .arg(
@@ -230,14 +318,192 @@ fn cli() -> Command {
                 .arg(
                     arg!(--write_protect <GROUPS> "Write-protect these groups: \"all\", or a list like 1,2,5-6,13")
                         .required(false),
+                )
+                .arg(
+                    arg!(--password <PASSWORD> "Set the customer password (6 bytes hex); unlock later with --key <password>")
+                        .required(false),
                 ),
         )
+        .subcommand(
+            Command::new("sinolink")
+                .about("Drive a genuine SinoLink USB dongle directly (diagnostics and raw access)")
+                .subcommand_required(true)
+                .subcommand(Command::new("probe").about("Show the dongle's version block, power state and stored parameter block"))
+                .subcommand(
+                    Command::new("dump")
+                        .about("Connect and read a range of target memory")
+                        .arg(arg!(-p --part <PART>).value_parser(PARTS.keys().copied().collect::<Vec<_>>()).required(true))
+                        .arg(arg!(--power <MODE> "Target power: 3v3, 5v or external").required(false))
+                        .args(sinolink_args())
+                        .arg(arg!(--key <KEY> "Customer password, 6 bytes hex").required(false))
+                        .arg(arg!(--addr <ADDR> "Start address").required(false))
+                        .arg(arg!(--len <LEN> "Byte count").required(false))
+                        .arg(arg!(--region <REGION> "code or custom").required(false))
+                        .arg(arg!(--out <FILE> "Write the bytes to this file as Intel HEX").required(false))
+                        .arg(arg!(--bin <FILE> "Write the bytes to this file raw").required(false)),
+                )
+                .subcommand(
+                    Command::new("raw")
+                        .about("Issue one vendor control-IN and print the reply")
+                        .arg(arg!(--req <N> "bRequest").required(true))
+                        .arg(arg!(--value <N> "wValue").required(false))
+                        .arg(arg!(--index <N> "wIndex").required(false))
+                        .arg(arg!(--len <N> "wLength").required(false)),
+                ),
+        )
+}
+
+/// The PARTS keys are static, so the chosen name can outlive the ArgMatches.
+fn part_name_static(sub: &ArgMatches) -> &'static str {
+    let n = sub
+        .get_one::<String>("part")
+        .map(|s| s.as_str())
+        .unwrap_or("");
+    PARTS.keys().find(|k| **k == n).copied().unwrap_or("")
+}
+
+fn make_programmer(
+    sub: &ArgMatches,
+    part: &'static Part,
+    cancelled: Arc<AtomicBool>,
+) -> Result<Box<dyn Programmer>, Box<dyn std::error::Error>> {
+    match sub.get_one::<String>("programmer").map(|s| s.as_str()) {
+        Some("sinolink") => Ok(Box::new(SinoLinkProgrammer::new(
+            part,
+            part_name_static(sub),
+            cancelled,
+            sinolink_settings(sub)?,
+        )?)),
+        _ => {
+            let port = sub
+                .get_one::<String>("port")
+                .ok_or("--port is required for the sinodude-serial programmer")?;
+            Ok(Box::new(SinodudeSerialProgrammer::new(
+                port, part, cancelled,
+            )?))
+        }
+    }
+}
+
+/// --power wins; --supply is kept as the older spelling.
+fn sinolink_settings(sub: &ArgMatches) -> Result<Settings, Box<dyn std::error::Error>> {
+    let power = sub
+        .get_one::<String>("power")
+        .or_else(|| sub.try_get_one::<String>("supply").ok().flatten());
+    let power_on_time = match sub.get_one::<String>("power_on_time") {
+        Some(v) => {
+            let t: u8 = v.parse()?;
+            if !(3..=27).contains(&t) {
+                return Err("--power_on_time must be 3..27".into());
+            }
+            t
+        }
+        None => 3,
+    };
+    Ok(Settings {
+        power: Power::parse(power.map(|s| s.as_str())),
+        link: Link::parse(sub.get_one::<String>("link").map(|s| s.as_str())),
+        power_on_time,
+        use_reset_pin: sub.get_flag("use_reset_pin"),
+        boot_rom: sub.get_flag("boot_rom"),
+    })
+}
+
+fn sinolink_cmd(
+    matches: &ArgMatches,
+    cancelled: Arc<AtomicBool>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let num = |sub: &ArgMatches, k: &str, d: usize| -> Result<usize, Box<dyn std::error::Error>> {
+        Ok(match sub.get_one::<String>(k) {
+            Some(v) => parse_addr(v)?,
+            None => d,
+        })
+    };
+    match matches.subcommand() {
+        Some(("probe", _)) => {
+            let link = SinoLink::open()?;
+            let v = link.version()?;
+            println!(
+                "firmware:     V{:x}.{:02x}, {}",
+                v.major(),
+                v.minor(),
+                v.personality()
+            );
+            println!("build:        {:02x?}", &v.raw[..6]);
+            println!("unique ID:    {}", hex_string(v.unique_id()));
+            println!("power state:  {:?}", link.power_state()?);
+            let (code, addr) = link.socket_status()?;
+            println!(
+                "last status:  {code:#04x} ({}) at {addr:#x}",
+                decode_sub_error(code)
+            );
+            let block = link.read_block()?;
+            println!(
+                "stored block: ChipType {:#04x}, link {}, power {}, power-on time {}, customer block {:#x}",
+                block[3],
+                block[4],
+                block[5],
+                block[6],
+                u32::from_le_bytes(block[0x204..0x208].try_into().unwrap())
+            );
+        }
+        Some(("raw", sub)) => {
+            let link = SinoLink::open()?;
+            let req = num(sub, "req", 0)? as u8;
+            let value = num(sub, "value", 0)? as u16;
+            let index = num(sub, "index", 0)? as u16;
+            let len = num(sub, "len", 64)? as u16;
+            if matches!(req, req::SWITCH_TO_DAP | req::ENTER_BOOTLOADER) {
+                return Err("that request reboots the dongle into another image".into());
+            }
+            let d = link.raw_in(req, value, index, len)?;
+            println!(
+                "req {req:#04x} val {value:#06x} idx {index:#06x} -> ({}) {:02x?}",
+                d.len(),
+                d
+            );
+        }
+        Some(("dump", sub)) => {
+            let name = part_name_static(sub);
+            let part = PARTS[name];
+            let mut programmer =
+                SinoLinkProgrammer::new(part, name, cancelled, sinolink_settings(sub)?)?;
+            if let Some(k) = sub.get_one::<String>("key") {
+                programmer.set_unlock_key(parse_unlock_key(k)?);
+            }
+            programmer.read_init()?;
+            let addr = num(sub, "addr", 0)? as u32;
+            let len = num(sub, "len", 0x100)?;
+            let region = match sub.get_one::<String>("region").map(|s| s.as_str()) {
+                Some("custom") => Region::Custom,
+                _ => Region::Flash,
+            };
+            let out = programmer.read_region(region, addr, len, "dump")?;
+            programmer.finish()?;
+            if len <= 0x400 {
+                for (i, row) in out.chunks(16).enumerate() {
+                    let hex: Vec<String> = row.iter().map(|b| format!("{:02x}", b)).collect();
+                    println!("{:06x}  {}", addr as usize + i * 16, hex.join(" "));
+                }
+            }
+            println!("md5 {:x}", md5::compute(&out));
+            if let Some(file) = sub.get_one::<String>("bin") {
+                fs::write(file, &out)?;
+            }
+            if let Some(file) = sub.get_one::<String>("out") {
+                fs::write(file, to_ihex(out)?)?;
+            }
+        }
+        _ => unreachable!(),
+    }
+    Ok(())
 }
 
 fn run(cancelled: Arc<AtomicBool>) -> Result<(), Box<dyn std::error::Error>> {
     let matches = cli().get_matches();
 
     match matches.subcommand() {
+        Some(("sinolink", sub_matches)) => return sinolink_cmd(sub_matches, cancelled),
         Some(("read", sub_matches)) => {
             let flash_file = sub_matches.get_one::<String>("flash");
             let eeprom_file = sub_matches.get_one::<String>("eeprom");
@@ -252,18 +518,11 @@ fn run(cancelled: Arc<AtomicBool>) -> Result<(), Box<dyn std::error::Error>> {
                 return Err(format!("{} has no data EEPROM", part_name).into());
             }
 
-            let port = sub_matches
-                .get_one::<String>("port")
-                .expect("--port is required for sinodude-serial programmer");
-            let mut programmer = SinodudeSerialProgrammer::new(port, part, cancelled.clone())?;
+            let mut programmer = make_programmer(sub_matches, part, cancelled.clone())?;
             if let Some(key) = sub_matches.get_one::<String>("key") {
-                let bytes = parse_hex(key)?;
-                let key: [u8; 8] = bytes
-                    .as_slice()
-                    .try_into()
-                    .map_err(|_| "Unlock key must be exactly 8 bytes")?;
-                programmer.set_unlock_key(key);
+                programmer.set_unlock_key(parse_unlock_key(key)?);
             }
+            programmer.set_ignore_part_number(sub_matches.get_flag("ignore_part_number"));
             programmer.read_init()?;
             let flash = flash_file.map(|_| programmer.read_flash()).transpose()?;
             let eeprom = eeprom_file.map(|_| programmer.read_eeprom()).transpose()?;
@@ -304,10 +563,6 @@ fn run(cancelled: Arc<AtomicBool>) -> Result<(), Box<dyn std::error::Error>> {
                     Ok(data)
                 })
                 .transpose()?;
-
-            let port = sub_matches
-                .get_one::<String>("port")
-                .expect("--port is required for sinodude-serial programmer");
 
             // Parse and validate address range before connecting
             let sector_size = part.sector_size;
@@ -386,15 +641,30 @@ fn run(cancelled: Arc<AtomicBool>) -> Result<(), Box<dyn std::error::Error>> {
                 })
                 .transpose()?;
 
-            let mut programmer = SinodudeSerialProgrammer::new(port, part, cancelled.clone())?;
+            let mut programmer = make_programmer(sub_matches, part, cancelled.clone())?;
             if let Some(key) = sub_matches.get_one::<String>("key") {
-                let bytes = parse_hex(key)?;
-                let key: [u8; 8] = bytes
-                    .as_slice()
-                    .try_into()
-                    .map_err(|_| "Unlock key must be exactly 8 bytes")?;
-                programmer.set_unlock_key(key);
+                programmer.set_unlock_key(parse_unlock_key(key)?);
             }
+            programmer.set_ignore_part_number(sub_matches.get_flag("ignore_part_number"));
+            let sectors = match (start_addr, end_addr) {
+                (None, None) => None,
+                (start, end) => Some((
+                    start.unwrap_or(0) as u32,
+                    end.unwrap_or(part.flash_size) as u32,
+                )),
+            };
+            programmer.set_project(Project {
+                flash: firmware.clone(),
+                eeprom: eeprom.clone(),
+                eeprom_area: eeprom.is_some(),
+                code_options: customer_option.clone(),
+                customer_id,
+                serial_number,
+                erase: firmware.is_some(),
+                program: true,
+                sectors: sectors.filter(|_| firmware.is_some()),
+                ..Project::default()
+            });
             programmer.write_init()?;
 
             // Flash goes first: its mass erase may take the EEPROM with it.
@@ -455,28 +725,39 @@ fn run(cancelled: Arc<AtomicBool>) -> Result<(), Box<dyn std::error::Error>> {
                 .map(|s| s.as_str())
                 .unwrap();
             let part = PARTS.get(part_name).unwrap();
-            let port = sub_matches
-                .get_one::<String>("port")
-                .expect("--port is required for sinodude-serial programmer");
 
-            let mut programmer = SinodudeSerialProgrammer::new(port, part, cancelled.clone())?;
+            let mut programmer = make_programmer(sub_matches, part, cancelled.clone())?;
             if let Some(key) = sub_matches.get_one::<String>("key") {
-                let bytes = parse_hex(key)?;
-                let key: [u8; 8] = bytes
-                    .as_slice()
-                    .try_into()
-                    .map_err(|_| "Unlock key must be exactly 8 bytes")?;
-                programmer.set_unlock_key(key);
+                programmer.set_unlock_key(parse_unlock_key(key)?);
             }
-            programmer.read_init()?;
+            programmer.set_ignore_part_number(sub_matches.get_flag("ignore_part_number"));
 
             let groups = part.protect_group_count();
             let group_size = part.protect_group_size();
 
             let read_spec = sub_matches.get_one::<String>("read_protect");
             let write_spec = sub_matches.get_one::<String>("write_protect");
+            let new_password: Option<[u8; PROTECTION_PASSWORD_LEN]> =
+                match sub_matches.get_one::<String>("password") {
+                    Some(p) => Some(
+                        parse_hex(p)?
+                            .as_slice()
+                            .try_into()
+                            .map_err(|_| "Password must be exactly 6 bytes")?,
+                    ),
+                    None => None,
+                };
+            let applying = read_spec.is_some() || write_spec.is_some() || new_password.is_some();
+            programmer.set_project(Project {
+                security: applying,
+                read_protect: parse_group_spec(read_spec.map(|s| s.as_str()), groups)?,
+                write_protect: parse_group_spec(write_spec.map(|s| s.as_str()), groups)?,
+                new_password,
+                ..Project::default()
+            });
+            programmer.read_init()?;
 
-            if read_spec.is_none() && write_spec.is_none() {
+            if read_spec.is_none() && write_spec.is_none() && new_password.is_none() {
                 let prot = programmer.read_protection()?;
                 println!(
                     "Protection: {} group(s) of {:#x} bytes ({} sector(s) per bit)",
@@ -511,8 +792,11 @@ fn run(cancelled: Arc<AtomicBool>) -> Result<(), Box<dyn std::error::Error>> {
                     write.iter().filter(|&&b| b).count(),
                     groups
                 );
+                if new_password.is_some() {
+                    eprintln!("Setting a customer password.");
+                }
                 eprintln!("This cannot be undone without a full mass erase.");
-                programmer.apply_protection(&read, &write)?;
+                programmer.apply_protection(&read, &write, new_password.as_ref())?;
                 eprintln!("Protection applied.");
             }
 
@@ -528,10 +812,6 @@ fn run(cancelled: Arc<AtomicBool>) -> Result<(), Box<dyn std::error::Error>> {
             if sub_matches.get_flag("eeprom") && part.eeprom_size == 0 {
                 return Err(format!("{} has no data EEPROM", part_name).into());
             }
-
-            let port = sub_matches
-                .get_one::<String>("port")
-                .expect("--port is required for sinodude-serial programmer");
 
             // Parse and validate address range before connecting
             let sector_size = part.sector_size;
@@ -563,15 +843,25 @@ fn run(cancelled: Arc<AtomicBool>) -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
-            let mut programmer = SinodudeSerialProgrammer::new(port, part, cancelled.clone())?;
+            let mut programmer = make_programmer(sub_matches, part, cancelled.clone())?;
             if let Some(key) = sub_matches.get_one::<String>("key") {
-                let bytes = parse_hex(key)?;
-                let key: [u8; 8] = bytes
-                    .as_slice()
-                    .try_into()
-                    .map_err(|_| "Unlock key must be exactly 8 bytes")?;
-                programmer.set_unlock_key(key);
+                programmer.set_unlock_key(parse_unlock_key(key)?);
             }
+            programmer.set_ignore_part_number(sub_matches.get_flag("ignore_part_number"));
+            let eeprom_only = sub_matches.get_flag("eeprom");
+            programmer.set_project(Project {
+                erase: true,
+                eeprom_area: eeprom_only,
+                sectors: match (start_addr, end_addr) {
+                    _ if eeprom_only => None,
+                    (None, None) => None,
+                    (start, end) => Some((
+                        start.unwrap_or(0) as u32,
+                        end.unwrap_or(part.flash_size) as u32,
+                    )),
+                },
+                ..Project::default()
+            });
             programmer.erase_init()?;
 
             if sub_matches.get_flag("eeprom") {
@@ -591,9 +881,10 @@ fn run(cancelled: Arc<AtomicBool>) -> Result<(), Box<dyn std::error::Error>> {
                 (None, Some(end)) => {
                     programmer.erase_sectors(0, end as u32)?;
                 }
-                (None, None) => {
-                    programmer.mass_erase()?;
-                }
+                (None, None) => match sub_matches.get_one::<String>("erase_mode") {
+                    Some(m) => programmer.mass_erase_with_mode(m.parse::<u8>()?)?,
+                    None => programmer.mass_erase()?,
+                },
             }
 
             programmer.finish()?;
@@ -626,5 +917,20 @@ fn main() {
             eprintln!("Error: {e}");
         }
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unlock_key_pads_six_byte_password() {
+        assert_eq!(
+            parse_unlock_key("a1b2c3d4e5f6").unwrap(),
+            [0xa1, 0xb2, 0xc3, 0xd4, 0xe5, 0xf6, 0, 0]
+        );
+        assert!(parse_unlock_key("a1b2c3d4e5f6f7f8").is_err()); // full 8-byte key not accepted
+        assert!(parse_unlock_key("a1b2c3").is_err()); // too short
     }
 }
