@@ -126,6 +126,14 @@ pub struct PartDefinition {
     pub option_byte_count: usize,
     pub security_level: u8,
     pub bank_type: u8,
+    pub reset_pin: u8,
+    pub erase_delay: u8,
+    pub frequency_division: u8,
+    pub writer_capacity: u32,
+    pub iap: u8,
+    pub isp_size: u32,
+    pub chip_version: u32,
+    pub part_num_address: u32,
     pub customer_id: AddressField,
     pub operation_number: AddressField,
     pub customer_option: AddressField,
@@ -327,6 +335,25 @@ fn parse_gpt_content(content: &str) -> Result<PartDefinition, GptError> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
 
+    // Integer descriptor field: hex after "0x", otherwise a decimal rounded to the nearest integer.
+    let int_field = |key: &str| -> u32 {
+        fields
+            .get(key)
+            .and_then(|s| match s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+                Some(hex) => u32::from_str_radix(hex, 16).ok(),
+                None => s.parse::<f64>().ok().map(|v| v.round() as u32),
+            })
+            .unwrap_or(0)
+    };
+    let reset_pin = int_field("RESETPIN") as u8;
+    let erase_delay = int_field("EraseDelay") as u8;
+    let frequency_division = int_field("Frequency_Division") as u8;
+    let writer_capacity = int_field("WriterCapacity");
+    let iap = int_field("IAP") as u8;
+    let isp_size = int_field("ISPSIZE");
+    let chip_version = int_field("ChipVersion");
+    let part_num_address = int_field("PartNumAddress");
+
     // Parse VDD voltages (ignore 0.0)
     let mut compatible_voltages = Vec::new();
     for key in ["VDD0", "VDD1", "VDD2"] {
@@ -386,6 +413,14 @@ fn parse_gpt_content(content: &str) -> Result<PartDefinition, GptError> {
         option_byte_count,
         security_level,
         bank_type,
+        reset_pin,
+        erase_delay,
+        frequency_division,
+        writer_capacity,
+        iap,
+        isp_size,
+        chip_version,
+        part_num_address,
         customer_id,
         operation_number,
         customer_option,
@@ -448,6 +483,23 @@ fn generate_rust_part_definition(part: &PartDefinition) -> String {
     ));
     output.push_str(&format!("    security_level: {},\n", part.security_level));
     output.push_str(&format!("    bank_type: {},\n", part.bank_type));
+    output.push_str(&format!("    reset_pin: {},\n", part.reset_pin));
+    output.push_str(&format!("    erase_delay: {},\n", part.erase_delay));
+    output.push_str(&format!(
+        "    frequency_division: {},\n",
+        part.frequency_division
+    ));
+    output.push_str(&format!(
+        "    writer_capacity: 0x{:x},\n",
+        part.writer_capacity
+    ));
+    output.push_str(&format!("    iap: {},\n", part.iap));
+    output.push_str(&format!("    isp_size: {},\n", part.isp_size));
+    output.push_str(&format!("    chip_version: {},\n", part.chip_version));
+    output.push_str(&format!(
+        "    part_num_address: 0x{:x},\n",
+        part.part_num_address
+    ));
 
     // Address fields
     fn format_address_field(addr: &AddressField) -> String {
