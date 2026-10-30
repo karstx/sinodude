@@ -399,6 +399,64 @@ impl IcpController {
         self.tdi_low();
     }
 
+    /// Shift 0xff out while shifting the target's status byte in, the way the dongle reads an
+    /// erase result. Sampling the TDO pin once instead returns the wrong thing for most opcodes.
+    fn icp_status_byte(&mut self) -> u8 {
+        let mut byte: u8 = 0;
+        let mut mask: u8 = 1;
+        self.tdi_high();
+        for _ in 0..8 {
+            self.delay_us(2);
+            self.tck_high();
+            self.delay_us(2);
+            self.tck_low();
+
+            if self.tdo_read() {
+                byte |= mask;
+            }
+
+            mask <<= 1;
+        }
+
+        self.delay_us(2);
+        self.tck_high();
+        self.delay_us(2);
+        self.tck_low();
+        self.tdi_low();
+
+        byte
+    }
+
+    /// Drive `out` on TDI while sampling TDO on the same clocks, the way the dongle reads the
+    /// echo during a page program: bytes go out MSB first, the reply assembles LSB first.
+    fn exchange_icp_byte(&mut self, out: u8) -> u8 {
+        let mut got: u8 = 0;
+        for i in 0..8 {
+            if out & (0x80 >> i) != 0 {
+                self.tdi_high();
+            } else {
+                self.tdi_low();
+            }
+
+            self.delay_us(2);
+            self.tck_high();
+            self.delay_us(2);
+            self.tck_low();
+
+            if self.tdo_read() {
+                got |= 1 << i;
+            }
+        }
+
+        self.delay_us(2);
+        self.tck_high();
+        self.delay_us(2);
+        self.tck_low();
+        self.tdi_low();
+
+        got
+    }
+
     fn receive_icp_byte(&mut self) -> u8 {
         let mut byte: u8 = 0;
         let mut mask: u8 = 1;
@@ -655,8 +713,14 @@ impl IcpController {
             return false;
         }
 
-        for byte in data.iter().skip(2) {
-            self.send_icp_byte(*byte);
+        // The dongle validates each byte here: the reply shifted in while sending data[i] must
+        // equal data[i-2]. Sampling TDO alone cannot see a wrong echo, so a corrupt program would
+        // have been reported as success.
+        for (i, byte) in data.iter().enumerate().skip(2) {
+            let echo = self.exchange_icp_byte(*byte);
+            if echo != data[i - 2] {
+                return false;
+            }
             self.delay_us(5);
             self.send_icp_byte(0x00);
             if !self.tdo_read() {
@@ -717,20 +781,16 @@ impl IcpController {
         self.send_icp_byte(0x06);
         self.send_icp_byte(0xff);
 
-        self.pins.tdi.set_high(); // keep tdi line high
-
-        self.delay.delay_ms(30u8);
-        let mut waited_ms: u16 = 0;
-        while !self.tdo_read() {
-            self.delay.delay_ms(5u8);
-            self.send_icp_byte(0x00);
-            waited_ms += 5;
-            if waited_ms >= 5000 {
-                return false;
-            }
+        // The dongle waits a fixed time for this chip type and then reads one status byte; polling
+        // the pin instead never sees the 0x00 a successful erase returns, and the bytes clocked in
+        // while polling break the erase itself.
+        if chip_type == 2 {
+            self.delay.delay_ms(150u8);
+        } else {
+            self.delay.delay_ms(30u8);
         }
 
-        true
+        self.icp_status_byte() == 0
     }
 
     fn icp_erase_flash(&mut self, addr: u32) -> bool {
@@ -767,14 +827,15 @@ impl IcpController {
         self.send_icp_byte(0x0a);
         self.send_icp_byte(0x09);
         self.send_icp_byte(0x06);
-        self.send_icp_byte(0x00);
+        self.send_icp_byte(0xff);
 
-        self.delay.delay_ms(300u16);
-        self.send_icp_byte(0x00);
-        let status = self.pins.tdo.is_high();
-        self.send_icp_byte(0x00);
+        if chip_type == 2 {
+            self.delay.delay_ms(150u8);
+        } else {
+            self.delay.delay_ms(30u8);
+        }
 
-        status
+        self.icp_status_byte() == 0
     }
 
     fn icp_write_custom_region(&mut self, addr: u32, data: &[u8]) -> bool {

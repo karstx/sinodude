@@ -1,8 +1,9 @@
 use super::super::parts::{
     find_parts_by_jtag_id, find_parts_by_part_number, format_parsed_options, hex_string,
-    parse_code_options, Part, Region, SecurityRecordFormat, Voltage, PROTECTION_MARK_LEN,
-    PROTECTION_MARK_OFFSET, PROTECTION_RECORD_LEN,
+    parse_code_options, Part, Region, SecurityRecordFormat, Voltage, PROTECTION_PASSWORD_LEN,
+    PROTECTION_PASSWORD_OFFSET, PROTECTION_RECORD_LEN,
 };
+use super::Protection;
 use indicatif::{ProgressBar, ProgressStyle};
 use log::debug;
 use std::io::{Read, Write};
@@ -140,12 +141,6 @@ pub enum SinodudeSerialProgrammerError {
     UnsupportedVoltage { supported: String },
 }
 
-pub struct Protection {
-    pub read: Vec<bool>,
-    pub write: Vec<bool>,
-    pub record: Vec<u8>,
-}
-
 pub struct SinodudeSerialProgrammer {
     port: Box<dyn serialport::SerialPort>,
     chip_type: &'static Part,
@@ -154,6 +149,7 @@ pub struct SinodudeSerialProgrammer {
     /// True if code options have non-editable bits that differ from defaults (use 0xc3 erase)
     non_default_option_bits: bool,
     unlock_key: Option<[u8; 8]>,
+    ignore_part_number: bool,
     /// Stored custom fields read from device during init
     stored_customer_id: Option<[u8; 4]>,
     stored_operation_number: Option<[u8; 2]>,
@@ -196,6 +192,7 @@ impl SinodudeSerialProgrammer {
             cancelled,
             non_default_option_bits: false,
             unlock_key: None,
+            ignore_part_number: false,
             stored_customer_id: None,
             stored_operation_number: None,
             stored_customer_option: None,
@@ -208,6 +205,15 @@ impl SinodudeSerialProgrammer {
     pub fn set_unlock_key(&mut self, key: [u8; 8]) {
         self.unlock_key = Some(key);
     }
+
+    /// Downgrade the part-number check to a warning. Needed for a die whose identity record has
+    /// been erased, which erase mode 3 (ICP 0x5E) does and no write path can undo.
+    pub fn set_ignore_part_number(&mut self, ignore: bool) {
+        self.ignore_part_number = ignore;
+    }
+
+    /// The serial programmer keeps no state on the programmer side, so it needs no project.
+    pub fn set_project(&mut self, _project: super::Project) {}
 
     fn check_cancelled(&self) -> Result<(), SinodudeSerialProgrammerError> {
         if self.cancelled.load(Ordering::SeqCst) {
@@ -425,6 +431,13 @@ impl SinodudeSerialProgrammer {
                     actual_str,
                     matching_parts.join(", ")
                 );
+            }
+            if self.ignore_part_number {
+                eprintln!(
+                    "Part number mismatch ignored: expected {}, got {}",
+                    expected_str, actual_str
+                );
+                return Ok(());
             }
             return Err(SinodudeSerialProgrammerError::PartNumberMismatch {
                 expected: expected_str,
@@ -988,6 +1001,11 @@ impl SinodudeSerialProgrammer {
                 part: self.part_label(),
             });
         }
+        if self.chip_type.protection_exceeds_record() {
+            return Err(SinodudeSerialProgrammerError::UnsupportedProtection {
+                part: self.part_label(),
+            });
+        }
         let addr = self.chip_type.security.address;
         let raw = self.read_region(Region::Custom, addr, PROTECTION_RECORD_LEN)?;
         let (read, write) = self.chip_type.decode_protection_record(&raw);
@@ -1002,8 +1020,14 @@ impl SinodudeSerialProgrammer {
         &mut self,
         read_protect: &[bool],
         write_protect: &[bool],
+        new_password: Option<&[u8; PROTECTION_PASSWORD_LEN]>,
     ) -> Result<(), SinodudeSerialProgrammerError> {
         if self.chip_type.security_record_format != SecurityRecordFormat::Record19 {
+            return Err(SinodudeSerialProgrammerError::UnsupportedProtection {
+                part: self.part_label(),
+            });
+        }
+        if self.chip_type.protection_exceeds_record() {
             return Err(SinodudeSerialProgrammerError::UnsupportedProtection {
                 part: self.part_label(),
             });
@@ -1016,16 +1040,20 @@ impl SinodudeSerialProgrammer {
                 PROTECTION_RECORD_LEN,
             )
             .unwrap_or_else(|_| vec![0u8; PROTECTION_RECORD_LEN]);
-        let mut custom_mark = [0u8; PROTECTION_MARK_LEN];
-        if existing.len() >= PROTECTION_MARK_OFFSET + PROTECTION_MARK_LEN {
-            custom_mark.copy_from_slice(
-                &existing[PROTECTION_MARK_OFFSET..PROTECTION_MARK_OFFSET + PROTECTION_MARK_LEN],
+        let mut password = [0u8; PROTECTION_PASSWORD_LEN];
+        if existing.len() >= PROTECTION_PASSWORD_OFFSET + PROTECTION_PASSWORD_LEN {
+            password.copy_from_slice(
+                &existing[PROTECTION_PASSWORD_OFFSET
+                    ..PROTECTION_PASSWORD_OFFSET + PROTECTION_PASSWORD_LEN],
             );
         }
+        if let Some(p) = new_password {
+            password = *p;
+        }
 
-        let record =
-            self.chip_type
-                .build_protection_record(read_protect, write_protect, &custom_mark);
+        let record = self
+            .chip_type
+            .build_protection_record(read_protect, write_protect, &password);
 
         for (i, (&want, &have)) in record.iter().zip(existing.iter()).enumerate() {
             if have & !want != 0 {
