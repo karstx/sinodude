@@ -86,16 +86,13 @@ fn parse_group_spec(
     Ok(selected)
 }
 
-fn sinolink_args() -> [Arg; 4] {
+fn sinolink_args() -> [Arg; 3] {
     [
         arg!(--power_on_time <N> "SinoLink power-on time, 3..27 (default 3)").required(false),
         arg!(--use_reset_pin "SinoLink: drive the reset pin during entry and always run a full entry")
             .action(clap::ArgAction::SetTrue)
             .required(false),
         arg!(--link <LINK> "SinoLink target link: 4wire (default) or 1wire").required(false),
-        arg!(--boot_rom "SinoLink: program and erase the boot (ISP) area; only for parts with an ISP region")
-            .action(clap::ArgAction::SetTrue)
-            .required(false),
     ]
 }
 
@@ -405,7 +402,6 @@ fn sinolink_settings(sub: &ArgMatches) -> Result<Settings, Box<dyn std::error::E
         link: Link::parse(sub.get_one::<String>("link").map(|s| s.as_str())),
         power_on_time,
         use_reset_pin: sub.get_flag("use_reset_pin"),
-        boot_rom: sub.get_flag("boot_rom"),
     })
 }
 

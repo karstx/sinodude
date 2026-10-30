@@ -235,10 +235,6 @@ pub struct Settings {
     /// "Use Reset Pin", parameter byte 9 bit 0. Also makes the host skip the power-state query and
     /// always send a full entry.
     pub use_reset_pin: bool,
-    /// The boot (ISP) area toggle (parameter byte `0x14`). Programs the top `isp_size` bytes of the
-    /// code image to the ISP region and erases it with the code. Valid only for parts with
-    /// `iap == 1`.
-    pub boot_rom: bool,
 }
 
 impl Default for Settings {
@@ -248,7 +244,6 @@ impl Default for Settings {
             link: Link::FourWire,
             power_on_time: 3,
             use_reset_pin: false,
-            boot_rom: false,
         }
     }
 }
@@ -1203,15 +1198,7 @@ pub fn build_block(
         eeprom.as_deref().map_or(0, |e| u32::from(crc16(e))),
     );
     put32(&mut b, E2_SUM, eeprom.as_deref().map_or(0, sum));
-    // With the boot area off there is no boot buffer, so its CRC-16 is 0. With it on, the buffer is
-    // the ISP tail (the top `isp_size` bytes of the code image).
-    let boot_crc = if settings.boot_rom {
-        let start = (chip.code_len - chip.isp_size) as usize;
-        u32::from(crc16(&code[start..]))
-    } else {
-        0
-    };
-    put32(&mut b, BOOT_CRC16, boot_crc);
+    put32(&mut b, BOOT_CRC16, 0);
 
     // The name goes in after the part-number address, so a 16-character name overwrites its low
     // bytes.
@@ -1244,7 +1231,7 @@ pub fn build_block(
         | if project.security { 0x01 } else { 0 };
     put32(&mut b, PROGRAM_LIMIT, 0);
     b[RUN_FLAGS] = 0;
-    b[BOOT_AREA] = u8::from(settings.boot_rom);
+    b[BOOT_AREA] = 0;
     b[OTP_AREA] = 0;
     b[DSP_SECURITY] = 0;
     b[SOCKETS] = 1;
@@ -1272,26 +1259,10 @@ pub fn build_block(
     put32(&mut b, SECTOR_SIZE, (part.sector_size as u32) & 0xffff);
     let sectors = chip.code_size.div_ceil(part.sector_size as u32);
     put32(&mut b, SECTOR_COUNT, sectors);
-    put32(
-        &mut b,
-        ISP_SIZE,
-        if settings.boot_rom {
-            chip.isp_size
-        } else {
-            chip.isp_size & 0xffff
-        },
-    );
-    if settings.boot_rom {
-        put32(&mut b, BOOT_BLK, chip.code_len - chip.isp_size);
-    }
+    put32(&mut b, ISP_SIZE, chip.isp_size & 0xffff);
     put32(&mut b, E2_SIZE, chip.eeprom_size);
-    let crc_base = if settings.boot_rom {
-        chip.code_len - chip.isp_size
-    } else {
-        chip.code_len
-    };
     put32(&mut b, CODE_LEN, chip.code_len);
-    put32(&mut b, CRC32_LEN, crc_base);
+    put32(&mut b, CRC32_LEN, chip.code_len);
     put32(&mut b, CODE_LEN_COPY, chip.code_len);
     put32(&mut b, E2_SIZE_COPY, chip.eeprom_size);
     b[SECURITY_LEVEL] = part.security_level;
@@ -1356,7 +1327,7 @@ pub fn build_block(
     b[FREQUENCY_DIVISION] = part.frequency_division;
 
     // The CRC-32 range ends at the 64-byte line after the last non-zero code byte past byte 0.
-    let mut crc_len = crc_base as usize;
+    let mut crc_len = chip.code_len as usize;
     if let Some(last) = (1..crc_len).rev().find(|&i| code[i] != 0) {
         crc_len = (last / 0x40 + 1) * 0x40;
         put32(&mut b, CRC32_LEN, crc_len as u32);
@@ -1398,24 +1369,18 @@ pub fn set_block_checksum(b: &mut [u8; BLOCK_LEN]) {
 /// The family-2 whole-chip erase type from the current option word 1 (`have`, as read from the
 /// part) and the one about to be written (`want`). The top byte holds the ISP size (high nibble)
 /// and E2 size (low nibble); a difference widens the erase: type 4 (`0x2D`) for a low-nibble
-/// difference, 5 (`0xC3`, code, ISP and E2) for a high-nibble one, else type 1. The Boot Rom area
-/// ORs into the high-nibble test, raising 1 to 2 and 4 to 5. A read-protected part answers all
+/// difference, 5 (`0xC3`, code, ISP and E2) for a high-nibble one, else type 1. A read-protected
+/// part answers all
 /// `0xFF`: the current partition cannot be read, so there is nothing to widen against and the base
 /// type is used (the target partition still comes from the option word written into the block).
-fn family2_erase_type(have: &[u8], want: &[u8; 4], boot: bool) -> u8 {
+fn family2_erase_type(have: &[u8], want: &[u8; 4]) -> u8 {
     if have.iter().all(|&b| b == 0xff) {
-        return 1 + u8::from(boot);
+        return 1;
     }
     let diff = have[3] ^ want[3];
-    let h = diff & 0xf0 != 0 || boot;
-    let l = diff & 0xf0 != 0 || diff & 0x0f != 0;
-    if h {
-        if l {
-            5
-        } else {
-            2
-        }
-    } else if l {
+    if diff & 0xf0 != 0 {
+        5
+    } else if diff & 0x0f != 0 {
         4
     } else {
         1
@@ -1508,9 +1473,6 @@ impl SinoLinkProgrammer {
 
     /// Firmware check, connect, customer key and identity read, in that order.
     fn session(&mut self) -> Result<()> {
-        if self.settings.boot_rom && (self.part.iap != 1 || self.part.isp_size == 0) {
-            return Err(SinoLinkError::Unsupported("this part has no boot/ISP area"));
-        }
         let version = self.link.version()?;
         if version.cores() & 1 == 0 || version.is_bootloader() {
             return Err(SinoLinkError::WrongPersonality(version.personality()));
@@ -1703,9 +1665,6 @@ impl SinoLinkProgrammer {
     }
 
     pub fn read_flash(&mut self) -> Result<Vec<u8>> {
-        // The whole image, boot area included, is readable from the code space: the boot/ISP tail is
-        // written there as part of the main program (it is only trimmed when `isp_size >= 0x10000`,
-        // which no supported part reaches). The separate space-1 boot copy is write only.
         self.read_region(Region::Flash, 0, self.part.flash_size, "flash")
     }
 
@@ -1752,20 +1711,18 @@ impl SinoLinkProgrammer {
     /// The whole-chip erase type. Family 2 reads option word 1 back and widens the erase when its
     /// top byte (ISP and E2 sizes) differs from the one to be written: type 4 (`0x2D`) for
     /// a low-nibble difference, 5 (`0xC3`, code, ISP and E2) for a high-nibble one. Every other
-    /// family uses type 1. The Boot Rom area raises type 1 to 2 (code and boot) and, for family 2,
-    /// ORs into the high-nibble test (`type = H ? (L ? 5 : 2) : (L ? 4 : 1)`, `H = hi | boot`).
+    /// family uses type 1.
     fn whole_chip_erase_type(&self) -> Result<u8> {
-        let boot = self.settings.boot_rom;
         if self.chip.family != 2 {
-            return Ok(1 + u8::from(boot));
+            return Ok(1);
         }
         let Some(want) = self.option_word_1() else {
-            return Ok(1 + u8::from(boot));
+            return Ok(1);
         };
         let have = self
             .link
             .read(self.chip.customer_block() + 0x100, Region::Custom, 4)?;
-        Ok(family2_erase_type(&have, &want, boot))
+        Ok(family2_erase_type(&have, &want))
     }
 
     fn erase_with_type(&mut self, ty: u8) -> Result<()> {
@@ -1817,24 +1774,7 @@ impl SinoLinkProgrammer {
     pub fn write_flash(&mut self, firmware: &[u8]) -> Result<()> {
         let n = self.part.flash_size.min(firmware.len());
         self.write_region(Region::Flash, 0, &firmware[..n], "flash")?;
-        if self.settings.boot_rom {
-            self.write_boot_tail(firmware)?;
-        }
         Ok(())
-    }
-
-    /// The boot (ISP) tail: the top `isp_size` bytes of the code image, programmed to space 1 at
-    /// the boot-block address. Sent only in whole-chip mode and never read back (the boot area is
-    /// encrypted and not verified), so there is no verify pass here either.
-    fn write_boot_tail(&mut self, firmware: &[u8]) -> Result<()> {
-        let isp = self.chip.isp_size as usize;
-        let bootblk = (self.chip.code_len - self.chip.isp_size) as usize;
-        let mut tail = vec![0u8; isp];
-        if firmware.len() > bootblk {
-            let avail = (firmware.len() - bootblk).min(isp);
-            tail[..avail].copy_from_slice(&firmware[bootblk..bootblk + avail]);
-        }
-        self.write_region(Region::Custom, bootblk as u32, &tail, "boot")
     }
 
     pub fn write_flash_range(&mut self, firmware: &[u8], start: usize, end: usize) -> Result<()> {
@@ -2200,69 +2140,13 @@ mod block_tests {
     }
 
     #[test]
-    fn boot_rom_sets_isp_block_fields() {
-        use field::*;
-        let part = &crate::parts::sh79f6488::PART;
-        let get32 =
-            |b: &[u8; BLOCK_LEN], at: usize| u32::from_le_bytes(b[at..at + 4].try_into().unwrap());
-        let off = build_block(
-            part,
-            "SH79F6488",
-            &Settings::default(),
-            &Project::default(),
-            &[0; 8],
-            chrono::NaiveDateTime::default(),
-        );
-        assert_eq!(off[BOOT_AREA], 0);
-        assert_eq!(get32(&off, BOOT_BLK), 0);
-
-        let settings = Settings {
-            boot_rom: true,
-            ..Settings::default()
-        };
-        let on = build_block(
-            part,
-            "SH79F6488",
-            &settings,
-            &Project::default(),
-            &[0; 8],
-            chrono::NaiveDateTime::default(),
-        );
-        assert_eq!(on[BOOT_AREA], 1);
-        let isp = part.isp_size;
-        assert_eq!(get32(&on, ISP_SIZE), isp);
-        assert_eq!(get32(&on, CODE_LEN), get32(&on, BOOT_BLK) + isp);
-        assert_eq!(get32(&on, CRC32_LEN), get32(&on, CODE_LEN) - isp);
-    }
-
-    #[test]
     fn family2_erase_type_widens_and_guards() {
         let want = [0x0f, 0x00, 0x00, 0x88];
-        // Same partition: base type (2 with boot).
-        assert_eq!(
-            family2_erase_type(&[0x0f, 0x00, 0x00, 0x88], &want, false),
-            1
-        );
-        assert_eq!(
-            family2_erase_type(&[0x0f, 0x00, 0x00, 0x88], &want, true),
-            2
-        );
-        // Low-nibble (E2) difference widens to 4, or 5 with boot.
-        assert_eq!(
-            family2_erase_type(&[0x0f, 0x00, 0x00, 0x80], &want, false),
-            4
-        );
-        assert_eq!(
-            family2_erase_type(&[0x0f, 0x00, 0x00, 0x80], &want, true),
-            5
-        );
-        // High-nibble (ISP) difference widens to 5.
-        assert_eq!(
-            family2_erase_type(&[0x0f, 0x00, 0x00, 0x08], &want, false),
-            5
-        );
-        // All 0xFF is a read-protected part: do not widen, use the base type.
-        assert_eq!(family2_erase_type(&[0xff; 4], &want, false), 1);
-        assert_eq!(family2_erase_type(&[0xff; 4], &want, true), 2);
+        assert_eq!(family2_erase_type(&[0x0f, 0x00, 0x00, 0x88], &want), 1);
+        // Low-nibble (E2) difference widens to 4, high-nibble (ISP) to 5.
+        assert_eq!(family2_erase_type(&[0x0f, 0x00, 0x00, 0x80], &want), 4);
+        assert_eq!(family2_erase_type(&[0x0f, 0x00, 0x00, 0x08], &want), 5);
+        // All 0xFF is a read-protected part: do not widen.
+        assert_eq!(family2_erase_type(&[0xff; 4], &want), 1);
     }
 }
