@@ -12,5 +12,5 @@ SinoWealth microcontrollers have limited public documentation. This tool has bee
 
 | Programmer | Description | Notes |
 |------------|-------------|-------|
-| sinodude-serial | Open-source Arduino Nano (ATmega328P or ATmega328PB) based programmer. See [docs/sinodude-serial.md](docs/sinodude-serial.md). | Recommended |
+| sinodude-serial | Open-source Arduino Nano (ATmega328P or ATmega328PB) based programmer. See [firmware/README.md](firmware/README.md) for details. | Recommended |
 | sinolink | The genuine SinoWealth SinoLink USB dongle (`258a:5063`) running its 8051 firmware. See [docs/sinolink.md](docs/sinolink.md). | 8051 parts only |
